@@ -5,16 +5,41 @@
 ; If extra bit is not set this will act like the red caped swooping super koopa, if the 
 ; extra bit is set it will act like the rising super koopa.
 ;
+
+!StarFix = 1 ; set to 1 if you want to make koopa die with star
+
+macro localJSL(dest, rtlop, db)
+	PHB			;first save our own DB
+	PHK			;first form 24bit return address
+	PEA.w ?return-1
+	PEA.w <rtlop>-1		;second comes 16bit return address
+	PEA.w <db><<8|<db>	;change db to desired value
+	PLB
+	PLB
+	JML <dest>
+?return:
+	PLB			;restore our own DB
+endmacro
+
+
+
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ; sprite init JSL
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
                     print "INIT ",pc
+                    LDA #$00 ; cannot be jumped on
+                    STA !1656,X   ; / 
+                    LDA !167A,X
+                    ORA #$A0 ; no default player interaction, process interaction every frame
+                    STA !167A,X
+
+
                     LDA !7FAB10,x
                     AND #$04
                     BEQ NotSet
                     LDY #$00                
-                    LDA $D1                   
+                    LDA $D1             ; Player X position (16-bit) within the level, current frame       
                     SEC                       
                     SBC !E4,X       
                     STA $0F                   
@@ -24,15 +49,16 @@
                     INY                            
                     TYA                       
                     STA !157C,X             
-                    LDA !E4,X       
+                    LDA !E4,X       ; x pos
                     AND #$10                
                     BEQ CODE_018547           
-                    LDA #$10                ; \ Can be jumped on 
-                    STA !1656,X   ; / 
+
+
                     LDA #$80                
                     STA !1662,X   
                     LDA #$10                
                     STA !1686,X   
+
                     RTL                       ; Return 
 
 CODE_018547:        INC !1534,X             
@@ -57,7 +83,7 @@ Return01AD41:       RTL
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ; sprite main code 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-                           
+
                     print "MAIN ",pc
                     PHB                       
                     PHK                       
@@ -83,34 +109,114 @@ SuperKoopa:         JSR SuperKoopaGfx
                     INY                       
 CODE_02EB44:        TYA                       
                     STA !1602,X             
-                    RTS                       ; Return 
+Return000:                    RTS                       ; Return 
 
 CODE_02EB49:        LDA $9D     
-                    BNE Return02EB7C          
+                    BNE Return000          
                     JSR SubOffscreen0Bnk2   
-                    JSL $01803A  
-                    JSL $018022  
-                    JSL $01801A
+
+		; "address": 98362, == '0x1803a'
+		; "description": "A subroutine that makes sprites interact with each other and with the player, essentially combining $018032 and $01A7DC.",
+                    ; JSL $01803A  	; interact with the player and with other sprites
+                    JSL $018032|!BankB	; interact with other sprites
+
+                    JSL $018022|!BankB   ; make the sprite move horizontally
+                    LDA $1491|!Base2	; $1491 = amount to move the player along the X axis (set in the position-updating routine)
+                    STA !1528,X
+
+;CODE_01A7F7: ProcessInteract:    20 30 AD      JSR.W SubHorizPos         
+;CODE_01A7FA:        A5 0F         LDA $0F                   
+
+                    JSL $01801A ; UpdateYPosNoGrvty
                     LDA !9E,X       
                     CMP #$73                
-                    BEQ CODE_02EB7D           
-                    LDY !157C,X     
+                    ; BEQ CODE_02EB7D
+                    BNE +
+                    BRL CODE_02EB7D
+                    +
+
+
+                    LDY !157C,X     ; horizontal sprite direction table. #$00 = Right; #$01 = Left. 
                     LDA DATA_02EB2F,Y       
-                    STA !B6,X    
+                    STA !B6,X    ; sprite x speed
                     JSR CODE_02EBF8         
                     LDA $13      
                     AND #$01                
                     BNE Return02EB7C          
-                    LDA !AA,X    
+                    LDA !AA,X    ; Sprite Y speed
                     CMP #$F0                
                     BMI Return02EB7C          
                     CLC                       
                     ADC #$FF                
-                    STA !AA,X    
-Return02EB7C:       RTS                       ; Return 
+                    STA !AA,X    ; Sprite Y speed
 
-CODE_02EB7D:        LDA !C2,X     
-                    JSL $0086DF          
+
+
+Return02EB7C:
+
+
+
+LDA $15A0,X ; offscreen
+BNE Return000
+
+; JSL.L $01B44F      ; make Mario able to stand on top of sprite
+; CODE_01B457:        20 F7 A7      JSR.W ProcessInteract      $01A7F7
+; CODE_01B45A:        90 56         BCC CODE_01B4B2           
+; CODE_01B45C:        B5 D8         LDA RAM_SpriteYLo,X       
+
+
+%localJSL($01A7F7|!BankB, $8021, $01|!BankB)
+BCC Return000 ; no contact
+
+%SubVertPos()		; check the vertical distance between the player and the sprite
+
+LDA $0F			; player Y position minus sprite Y position
+CMP #$EC		; this value shifts the point where mario takes damage downwards. it allows the player to walk from koopa to koopa when they are x-adjacent (and spawned quickly enough)
+BPL KoopaWins
+
+%localJSL($01B45C|!BankB, $8021, $01|!BankB)
+BCC Return000
+
+; move mario down into the koopa to prevent floating in the air next frame
+; 01B45C sets mario's position based on the sprite position, but it seems
+; to be for platforms' clipping values of $FE vs ours of $03. so compensate here
+LDA $96|!Base1 ; mario Y position
+CLC
+ADC #$03
+STA $96|!Base1
+LDA $97|!Base1 ; mario Y position high byte
+ADC #$00
+STA $97|!Base1
+
+KoopaReturn:
+RTS
+
+
+KoopaWins:
+If !StarFix == 1	; New check
+LDA $1490|!Base2	; If option is set
+BEQ NoStar		; Check for star
+%Star()			; Kill if have
+endif			;
+NoStar:			;
+LDA !154C,x		; if the interaction-disable timer is set...
+ORA !15D0,x		; or the mole is being eaten...
+ORA !1510,x		; or the extra bit is set...
+BNE KoopaReturn		; return
+
+!YoshiFix = 0
+If !YoshiFix == 1	; Another new check
+LDA $187A|!Base2	; If on yoshi
+BEQ KoopaReturn		; It seem like it doesn't do anything, but it's not true, instead of simply hurt mario on yoshi, it makes yoshi run away.
+endif
+
+JSL $00F5B7|!BankB	; if none of the above are true, hurt the player
+
+RTS
+
+CODE_02EB7D:
+        LDA !C2,X     
+                    JSL $0086DF          ; execute_pointer
 
 SuperKoopaPtrs:     dw CODE_02EB8D           
                     dw CODE_02EBD1           
@@ -310,7 +416,7 @@ CODE_02ED5F:        STA $0303|!Base2,Y
 SkipJump:           PLX                       
                     LDY #$FF                
                     LDA #$03                
-                    JSL $01B7B3    
+                    JSL $01B7B3    ; FinishOAMWrite
                     RTS                       ; Return 
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
